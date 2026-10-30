@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eventpro-common"
+version = "0.1.0"
+description = "Logique métier partagée EventPro : taxonomie, normalisation, déduplication, embeddings."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6,<3",
+    "python-dateutil>=2.9,<3",
+]
+
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=3.0,<4",
+    "numpy>=1.26",
+]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
