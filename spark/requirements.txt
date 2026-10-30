@@ -1,0 +1,5 @@
+# Exécution des jobs hors Docker (dev local). Java 17 requis.
+# pip install -r spark/requirements.txt -e "common[embeddings]"
+pyspark==3.5.3
+pyarrow>=14,<19
+pandas>=2.1,<3

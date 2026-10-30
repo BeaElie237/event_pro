@@ -1,0 +1,9 @@
+# Dépendances additionnelles de l'image Airflow (Airflow et ses providers sont déjà dans l'image)
+apache-airflow-providers-postgres>=6.0,<7
+apache-airflow-providers-common-sql>=1.20,<2
+pyspark==3.5.3
+pyarrow>=14,<19
+pandas>=2.1,<3
+httpx>=0.27,<1
+feedparser>=6.0,<7
+PyYAML>=6.0,<7

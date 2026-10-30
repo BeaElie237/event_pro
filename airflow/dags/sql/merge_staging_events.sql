@@ -1,0 +1,60 @@
+-- Upsert idempotent du batch courant : staging_events -> events.
+-- Rendu par Jinja (SQLExecuteQueryOperator) : la date de batch vient de la tâche resolve_batch_date.
+INSERT INTO events (
+    fingerprint, source, source_event_id, title, description, url,
+    category, funding_type, event_format, status,
+    organizer, location_raw, city, country_code, country_name, continent,
+    start_date, end_date, deadline, tags, language,
+    embedding, embedding_model, ingestion_channel, raw_payload, scraped_at
+)
+SELECT
+    s.fingerprint,
+    s.source,
+    s.source_event_id,
+    left(s.title, 500),
+    s.description,
+    s.url,
+    s.category::event_category,
+    s.funding_type::funding_type,
+    s.event_format::event_format,
+    compute_event_status(s.start_date, s.end_date, s.deadline),
+    s.organizer,
+    s.location_raw,
+    s.city,
+    s.country_code,
+    s.country_name,
+    s.continent,
+    s.start_date,
+    s.end_date,
+    s.deadline,
+    COALESCE(ARRAY(SELECT jsonb_array_elements_text(s.tags::jsonb)), '{}'),
+    s.language,
+    s.embedding::vector,
+    s.embedding_model,
+    'batch',
+    COALESCE(s.raw_payload::jsonb, '{}'::jsonb),
+    s.scraped_at
+FROM staging_events AS s
+WHERE s.batch_date = '{{ ti.xcom_pull(task_ids="resolve_batch_date") }}'::date
+ON CONFLICT (fingerprint) DO UPDATE SET
+    title           = EXCLUDED.title,
+    description     = COALESCE(EXCLUDED.description, events.description),
+    url             = COALESCE(EXCLUDED.url, events.url),
+    category        = EXCLUDED.category,
+    funding_type    = CASE WHEN EXCLUDED.funding_type = 'unknown' THEN events.funding_type ELSE EXCLUDED.funding_type END,
+    event_format    = CASE WHEN EXCLUDED.event_format = 'unknown' THEN events.event_format ELSE EXCLUDED.event_format END,
+    status          = CASE WHEN events.status = 'cancelled' THEN events.status ELSE EXCLUDED.status END,
+    organizer       = COALESCE(EXCLUDED.organizer, events.organizer),
+    location_raw    = COALESCE(EXCLUDED.location_raw, events.location_raw),
+    city            = COALESCE(EXCLUDED.city, events.city),
+    country_code    = COALESCE(EXCLUDED.country_code, events.country_code),
+    country_name    = COALESCE(EXCLUDED.country_name, events.country_name),
+    continent       = COALESCE(EXCLUDED.continent, events.continent),
+    end_date        = COALESCE(EXCLUDED.end_date, events.end_date),
+    deadline        = COALESCE(EXCLUDED.deadline, events.deadline),
+    tags            = (SELECT ARRAY(SELECT DISTINCT unnest(events.tags || EXCLUDED.tags))),
+    embedding       = COALESCE(EXCLUDED.embedding, events.embedding),
+    embedding_model = COALESCE(EXCLUDED.embedding_model, events.embedding_model),
+    raw_payload     = EXCLUDED.raw_payload,
+    scraped_at      = EXCLUDED.scraped_at,
+    last_seen_at    = now();

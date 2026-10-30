@@ -1,0 +1,53 @@
+# =============================================================================
+# Sources de scraping batch — une entrée = une tâche Airflow mappée dynamiquement.
+#
+# Avant d'activer une source : vérifier ses conditions d'utilisation et son
+# robots.txt. Les flux RSS publics sont privilégiés (prévus pour la syndication).
+# =============================================================================
+defaults:
+  timeout_seconds: 30
+  max_items: 200
+  user_agent: "EventProBot/0.1 (+https://github.com/BeaElie237/event_pro)"
+
+sources:
+  - name: opportunity_desk
+    type: rss
+    enabled: true
+    url: https://opportunitydesk.org/feed/
+    language: en
+
+  - name: opportunities_for_africans
+    type: rss
+    enabled: true
+    url: https://www.opportunitiesforafricans.com/feed/
+    language: en
+
+  - name: after_school_africa
+    type: rss
+    enabled: true
+    url: https://www.afterschoolafrica.com/feed/
+    language: en
+
+  # Exemple d'API JSON générique (désactivé) : mapping champ cible -> chemin pointé
+  - name: example_events_api
+    type: json_api
+    enabled: false
+    url: https://api.example.org/v1/events
+    params:
+      region: africa
+      per_page: 100
+    headers:
+      Accept: application/json
+    items_path: data.items
+    field_map:
+      source_event_id: id
+      title: name
+      description: summary
+      url: links.self
+      start_date: schedule.start
+      end_date: schedule.end
+      deadline: registration.deadline
+      location: venue.city
+      organizer: organizer.name
+      category_hint: type
+      tags: topics
