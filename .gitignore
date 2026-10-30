@@ -1,0 +1,41 @@
+# Secrets
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Données produites par les pipelines
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Airflow
+airflow/logs/*
+!airflow/logs/.gitkeep
+airflow/*.pid
+airflow/airflow.cfg
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

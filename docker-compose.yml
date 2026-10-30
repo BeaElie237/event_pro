@@ -1,0 +1,271 @@
+# =============================================================================
+# EventPro — stack locale
+#
+#   docker compose up -d --build                         # Postgres + Airflow + API
+#   docker compose --profile streaming up -d --build     # + Redpanda + webhook + consumer
+#
+# UIs :  Airflow http://localhost:8080   |   API docs http://localhost:8000/docs
+# =============================================================================
+name: eventpro
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  image: eventpro/airflow:latest
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # Connexion utilisée par les SQLExecuteQueryOperator du DAG
+    AIRFLOW_CONN_EVENTPRO_DB: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    # Paramètres lus par les jobs Spark (JDBC)
+    EVENTPRO_DB_HOST: postgres
+    EVENTPRO_DB_PORT: "5432"
+    EVENTPRO_DB_NAME: ${POSTGRES_DB}
+    EVENTPRO_DB_USER: ${POSTGRES_USER}
+    EVENTPRO_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    EVENTPRO_DATA_DIR: /opt/airflow/data
+    EVENTPRO_SPARK_DIR: /opt/airflow/spark
+    EVENTPRO_SOURCES_FILE: /opt/airflow/include/sources.yaml
+    EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    PYTHONPATH: /opt/airflow/include
+    PYSPARK_PYTHON: python
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/include:/opt/airflow/include
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/logs:/opt/airflow/logs
+    - ./spark:/opt/airflow/spark
+    - ./data:/opt/airflow/data
+    - airflow_models:/opt/airflow/models
+  depends_on: &airflow-depends-on
+    airflow-db:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------------------
+  # Base applicative : PostgreSQL 16 + pgvector
+  # ---------------------------------------------------------------------------
+  postgres:
+    # pgvector >= 0.8 requis (hnsw.iterative_scan pour la recherche filtrée)
+    image: pgvector/pgvector:0.8.0-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Base de métadonnées Airflow (isolée de la base applicative)
+  # ---------------------------------------------------------------------------
+  airflow-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Airflow 3 (LocalExecutor)
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        (airflow users create \
+          --username "$${_AIRFLOW_ADMIN_USER}" --password "$${_AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname Admin --lastname EventPro --role Admin --email admin@eventpro.local \
+          || echo "Admin user already exists")
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------------------------------------------------------------------
+  # API FastAPI
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: eventpro/backend:latest
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-[]}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - backend_models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Le premier démarrage télécharge le modèle d'embedding (~470 Mo)
+      start_period: 180s
+
+  # ---------------------------------------------------------------------------
+  # Streaming (optionnel) : docker compose --profile streaming up -d
+  # ---------------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.10
+    profiles: ["streaming"]
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --mode=dev-container
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  streaming-webhook:
+    build:
+      context: .
+      dockerfile: streaming/Dockerfile
+    image: eventpro/streaming:latest
+    profiles: ["streaming"]
+    command: ["uvicorn", "app.webhook:app", "--host", "0.0.0.0", "--port", "8001"]
+    restart: unless-stopped
+    environment: &streaming-env
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      KAFKA_TOPIC_EVENTS: ${KAFKA_TOPIC_EVENTS:-events.incoming}
+      KAFKA_TOPIC_DLQ: ${KAFKA_TOPIC_DLQ:-events.dlq}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      DATABASE_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+    ports:
+      - "${WEBHOOK_PORT:-8001}:8001"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  streaming-consumer:
+    image: eventpro/streaming:latest
+    profiles: ["streaming"]
+    command: ["python", "-m", "app.consumer"]
+    restart: unless-stopped
+    environment: *streaming-env
+    volumes:
+      - streaming_models:/models
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      streaming-webhook:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  airflow_db_data:
+  airflow_models:
+  backend_models:
+  streaming_models:
+  redpanda_data:
